@@ -16,7 +16,7 @@
 ├── model
 │   └── vit_checkpoint
 │       └── imagenet21k
-│           ├── R50+ViT-B_16.npz
+│           ├── R50-ViT-B_16.npz
 │           └── *.npz
 └── data
     └──Synapse

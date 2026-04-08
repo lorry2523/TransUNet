@@ -14,7 +14,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from utils import DiceLoss
 from torchvision import transforms
+import random
+import functools
 
+def _worker_init_fn(seed, worker_id):
+    """设置每个 worker 的随机种子，确保可重复性"""
+    random.seed(seed + worker_id)
 def trainer_synapse(args, model, snapshot_path):
     from datasets.dataset_synapse import Synapse_dataset, RandomGenerator
     logging.basicConfig(filename=snapshot_path + "/log.txt", level=logging.INFO,
@@ -30,11 +35,10 @@ def trainer_synapse(args, model, snapshot_path):
                                    [RandomGenerator(output_size=[args.img_size, args.img_size])]))
     print("The length of train set is: {}".format(len(db_train)))
 
-    def worker_init_fn(worker_id):
-        random.seed(args.seed + worker_id)
+    worker_init = functools.partial(_worker_init_fn, args.seed)
 
-    trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True,
-                             worker_init_fn=worker_init_fn)
+    trainloader = DataLoader(db_train, batch_size=args.batch_size, shuffle=True,
+                             num_workers=0, worker_init_fn=worker_init, pin_memory=True)
     if args.n_gpu > 1:
         model = nn.DataParallel(model)
     model.train()

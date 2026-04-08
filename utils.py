@@ -59,44 +59,49 @@ def calculate_metric_percase(pred, gt):
 
 
 def test_single_volume(image, label, net, classes, patch_size=[256, 256], test_save_path=None, case=None, z_spacing=1):
-    image, label = image.squeeze(0).cpu().detach().numpy(), label.squeeze(0).cpu().detach().numpy()
-    if len(image.shape) == 3:
-        prediction = np.zeros_like(label)
-        for ind in range(image.shape[0]):
-            slice = image[ind, :, :]
-            x, y = slice.shape[0], slice.shape[1]
-            if x != patch_size[0] or y != patch_size[1]:
-                slice = zoom(slice, (patch_size[0] / x, patch_size[1] / y), order=3)  # previous using 0
-            input = torch.from_numpy(slice).unsqueeze(0).unsqueeze(0).float().cuda()
-            net.eval()
-            with torch.no_grad():
-                outputs = net(input)
-                out = torch.argmax(torch.softmax(outputs, dim=1), dim=1).squeeze(0)
-                out = out.cpu().detach().numpy()
-                if x != patch_size[0] or y != patch_size[1]:
-                    pred = zoom(out, (x / patch_size[0], y / patch_size[1]), order=0)
-                else:
-                    pred = out
-                prediction[ind] = pred
+    # 移除 batch 维度
+    if isinstance(image, torch.Tensor):
+        image = image.squeeze(0).cpu().detach().numpy()
+        label = label.squeeze(0).cpu().detach().numpy()
     else:
-        input = torch.from_numpy(image).unsqueeze(
-            0).unsqueeze(0).float().cuda()
-        net.eval()
-        with torch.no_grad():
-            out = torch.argmax(torch.softmax(net(input), dim=1), dim=1).squeeze(0)
-            prediction = out.cpu().detach().numpy()
+        image = image.squeeze(0) if image.ndim == 4 else image
+        label = label.squeeze(0) if label.ndim == 4 else label
+
+    # 获取原始尺寸
+    orig_h, orig_w = image.shape[:2]
+
+    # 图像缩放至模型输入尺寸
+    if orig_h != patch_size[0] or orig_w != patch_size[1]:
+        if image.ndim == 3:  # 彩色
+            image_resized = zoom(image, (patch_size[0]/orig_h, patch_size[1]/orig_w, 1), order=3)
+        else:  # 灰度
+            image_resized = zoom(image, (patch_size[0]/orig_h, patch_size[1]/orig_w), order=3)
+    else:
+        image_resized = image
+
+    # 转换为模型输入格式
+    if image_resized.ndim == 3:  # 彩色
+        input_tensor = torch.from_numpy(image_resized).permute(2, 0, 1).unsqueeze(0).float().cuda()
+    else:  # 灰度
+        input_tensor = torch.from_numpy(image_resized).unsqueeze(0).unsqueeze(0).float().cuda()
+
+    net.eval()
+    with torch.no_grad():
+        out = net(input_tensor)
+        pred = torch.argmax(torch.softmax(out, dim=1), dim=1).squeeze(0).cpu().numpy()
+
+    # 将预测结果上采样回原始尺寸
+    if orig_h != patch_size[0] or orig_w != patch_size[1]:
+        pred = zoom(pred, (orig_h / patch_size[0], orig_w / patch_size[1]), order=0)
+
+    # 计算指标（与原始相同）
+    metric_list = []
+    for i in range(1, classes):
+        metric_list.append(calculate_metric_percase(pred == i, label == i))
+    return metric_list
+
+    # 计算指标（与原始代码相同）
     metric_list = []
     for i in range(1, classes):
         metric_list.append(calculate_metric_percase(prediction == i, label == i))
-
-    if test_save_path is not None:
-        img_itk = sitk.GetImageFromArray(image.astype(np.float32))
-        prd_itk = sitk.GetImageFromArray(prediction.astype(np.float32))
-        lab_itk = sitk.GetImageFromArray(label.astype(np.float32))
-        img_itk.SetSpacing((1, 1, z_spacing))
-        prd_itk.SetSpacing((1, 1, z_spacing))
-        lab_itk.SetSpacing((1, 1, z_spacing))
-        sitk.WriteImage(prd_itk, test_save_path + '/'+case + "_pred.nii.gz")
-        sitk.WriteImage(img_itk, test_save_path + '/'+ case + "_img.nii.gz")
-        sitk.WriteImage(lab_itk, test_save_path + '/'+ case + "_gt.nii.gz")
     return metric_list

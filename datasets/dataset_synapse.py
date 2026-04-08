@@ -32,18 +32,25 @@ class RandomGenerator(object):
     def __call__(self, sample):
         image, label = sample['image'], sample['label']
 
+        # 随机翻转/旋转（保持不变）
         if random.random() > 0.5:
             image, label = random_rot_flip(image, label)
         elif random.random() > 0.5:
             image, label = random_rotate(image, label)
-        x, y = image.shape
+
+        # 获取图像的高度和宽度（忽略通道）
+        x, y = image.shape[:2]
+
         if x != self.output_size[0] or y != self.output_size[1]:
-            image = zoom(image, (self.output_size[0] / x, self.output_size[1] / y), order=3)  # why not 3?
+            # 图像缩放：传入三个缩放因子 (h_scale, w_scale, 1)，保持通道数不变
+            image = zoom(image, (self.output_size[0] / x, self.output_size[1] / y, 1), order=3)
+            # 标签缩放：传入两个缩放因子 (h_scale, w_scale)
             label = zoom(label, (self.output_size[0] / x, self.output_size[1] / y), order=0)
-        image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)
-        label = torch.from_numpy(label.astype(np.float32))
-        sample = {'image': image, 'label': label.long()}
-        return sample
+
+        # 转换格式
+        image = torch.from_numpy(image.astype(np.float32)).permute(2, 0, 1)  # HWC -> CHW
+        label = torch.from_numpy(label.astype(np.int64))
+        return {'image': image, 'label': label}
 
 
 class Synapse_dataset(Dataset):
@@ -57,16 +64,13 @@ class Synapse_dataset(Dataset):
         return len(self.sample_list)
 
     def __getitem__(self, idx):
-        if self.split == "train":
-            slice_name = self.sample_list[idx].strip('\n')
-            data_path = os.path.join(self.data_dir, slice_name+'.npz')
-            data = np.load(data_path)
-            image, label = data['image'], data['label']
-        else:
-            vol_name = self.sample_list[idx].strip('\n')
-            filepath = self.data_dir + "/{}.npy.h5".format(vol_name)
-            data = h5py.File(filepath)
-            image, label = data['image'][:], data['label'][:]
+        slice_name = self.sample_list[idx].strip('\n')
+        data_path = os.path.join(self.data_dir, slice_name + '.npz')
+        data = np.load(data_path)
+        image, label = data['image'], data['label']
+
+        # 确保label是int64（CrossEntropyLoss需要）
+        label = label.astype(np.int64)
 
         sample = {'image': image, 'label': label}
         if self.transform:
