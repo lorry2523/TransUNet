@@ -100,8 +100,40 @@ def test_single_volume(image, label, net, classes, patch_size=[256, 256], test_s
         metric_list.append(calculate_metric_percase(pred == i, label == i))
     return metric_list
 
-    # 计算指标（与原始代码相同）
-    metric_list = []
-    for i in range(1, classes):
-        metric_list.append(calculate_metric_percase(prediction == i, label == i))
-    return metric_list
+
+def compute_metrics(pred, label, num_classes=2):
+    """
+    计算前景类（类别1）的评估指标
+    Args:
+        pred: 模型预测标签 (B, H, W) 或 (H, W)，取值0或1
+        label: 真实标签 (B, H, W) 或 (H, W)
+        num_classes: 总类别数，默认2（背景0，前景1）
+    Returns:
+        iou, dice, pa: 前景类的交并比、Dice系数、像素精度
+    """
+    # 确保是 PyTorch Tensor 且在 CPU 上计算
+    if not isinstance(pred, torch.Tensor):
+        pred = torch.tensor(pred)
+    if not isinstance(label, torch.Tensor):
+        label = torch.tensor(label)
+
+    pred = pred.flatten().long()
+    label = label.flatten().long()
+
+    # 混淆矩阵计算（只取有效的类别范围）
+    mask = (label >= 0) & (label < num_classes)
+    pred, label = pred[mask], label[mask]
+
+    cm = torch.bincount(num_classes * label + pred, minlength=num_classes ** 2).reshape(num_classes, num_classes)
+
+    tp = cm[1, 1]
+    fp = cm[0, 1] + cm[1, 0]  # 注意：对于二分类，背景误分为前景和前景误分为背景都算FP
+    fn = cm[1, 0]
+
+    # 添加极小值防止除零
+    smooth = 1e-6
+    iou = tp / (tp + fp + fn + smooth)
+    dice = (2 * tp) / (2 * tp + fp + fn + smooth)
+    pa = tp / (tp + fp + smooth)
+
+    return iou.item(), dice.item(), pa.item()

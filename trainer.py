@@ -12,88 +12,128 @@ from tensorboardX import SummaryWriter
 from torch.nn.modules.loss import CrossEntropyLoss
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from utils import DiceLoss, compute_metrics
 from utils import DiceLoss
 from torchvision import transforms
 import random
 import functools
+from torch.cuda.amp import autocast, GradScaler
+
+#早停验证指标
+class EarlyStopping:
+    """早停管理，监控验证指标"""
+    def __init__(self, patience=15, verbose=False, delta=0.001, path='best_model.pth', mode='max'):
+        self.patience = patience
+        self.verbose = verbose
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.delta = delta
+        self.path = path
+        self.mode = mode
+        self.val_score_max = -float('inf') if mode == 'max' else float('inf')
+
+    def __call__(self, val_score, model):
+        score = val_score if self.mode == 'max' else -val_score
+        if self.best_score is None:
+            self.best_score = score
+            self.save_checkpoint(val_score, model)
+        elif score < self.best_score + self.delta:
+            self.counter += 1
+            if self.verbose:
+                print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.save_checkpoint(val_score, model)
+            self.counter = 0
+
+    def save_checkpoint(self, val_score, model):
+        if self.verbose:
+            print(f'Validation score ({self.mode}) improved. Saving model ...')
+        torch.save(model.state_dict(), self.path)
 
 def _worker_init_fn(seed, worker_id):
     """设置每个 worker 的随机种子，确保可重复性"""
     random.seed(seed + worker_id)
 def trainer_synapse(args, model, snapshot_path):
     from datasets.dataset_synapse import Synapse_dataset, RandomGenerator
+    import logging
+    import sys
     logging.basicConfig(filename=snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
-    base_lr = args.base_lr
+
     num_classes = args.num_classes
     batch_size = args.batch_size * args.n_gpu
-    # max_iterations = args.max_iterations
+
+    # 训练集
     db_train = Synapse_dataset(base_dir=args.root_path, list_dir=args.list_dir, split="train",
-                               transform=transforms.Compose(
-                                   [RandomGenerator(output_size=[args.img_size, args.img_size])]))
-    print("The length of train set is: {}".format(len(db_train)))
+                               transform=transforms.Compose([RandomGenerator(output_size=[args.img_size, args.img_size])]))
+    trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
 
-    worker_init = functools.partial(_worker_init_fn, args.seed)
+    # 验证集
+    val_root = args.root_path.replace('train_npz', 'val_npz')
+    db_val = Synapse_dataset(base_dir=val_root, list_dir=args.list_dir, split="val",
+                             transform=transforms.Compose([RandomGenerator(output_size=[args.img_size, args.img_size])]))
+    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
 
-    trainloader = DataLoader(db_train, batch_size=args.batch_size, shuffle=True,
-                             num_workers=0, worker_init_fn=worker_init, pin_memory=True)
-    if args.n_gpu > 1:
-        model = nn.DataParallel(model)
+    def validate():
+        model.eval()
+        miou_sum, dice_sum, pa_sum, cnt = 0.0, 0.0, 0.0, 0
+        with torch.no_grad():
+            for batch in valloader:
+                img, label = batch['image'].cuda(), batch['label'].cuda()
+                with autocast():
+                    pred = torch.argmax(torch.softmax(model(img), dim=1), dim=1)
+                iou, dice, pa = compute_metrics(pred, label, num_classes)
+                miou_sum += iou
+                dice_sum += dice
+                pa_sum += pa
+                cnt += 1
+        model.train()
+        return (miou_sum / cnt, dice_sum / cnt, pa_sum / cnt) if cnt else (0, 0, 0)
+
     model.train()
     ce_loss = CrossEntropyLoss()
     dice_loss = DiceLoss(num_classes)
-    optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.max_epochs, eta_min=1e-6)
+    scaler = GradScaler()
     writer = SummaryWriter(snapshot_path + '/log')
+    early_stopping = EarlyStopping(patience=20, verbose=True, mode='max',
+                                   path=os.path.join(snapshot_path, 'best_model.pth'))
+
     iter_num = 0
     max_epoch = args.max_epochs
-    max_iterations = args.max_epochs * len(trainloader)  # max_epoch = max_iterations // len(trainloader) + 1
-    logging.info("{} iterations per epoch. {} max iterations ".format(len(trainloader), max_iterations))
-    best_performance = 0.0
     iterator = tqdm(range(max_epoch), ncols=70)
+
     for epoch_num in iterator:
         for i_batch, sampled_batch in enumerate(trainloader):
-            image_batch, label_batch = sampled_batch['image'], sampled_batch['label']
-            image_batch, label_batch = image_batch.cuda(), label_batch.cuda()
-            outputs = model(image_batch)
-            loss_ce = ce_loss(outputs, label_batch[:].long())
-            loss_dice = dice_loss(outputs, label_batch, softmax=True)
-            loss = 0.5 * loss_ce + 0.5 * loss_dice
+            image_batch, label_batch = sampled_batch['image'].cuda(), sampled_batch['label'].cuda()
+            with autocast():
+                outputs = model(image_batch)
+                loss = 0.5 * ce_loss(outputs, label_batch.long()) + 0.5 * dice_loss(outputs, label_batch, softmax=True)
+
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            lr_ = base_lr * (1.0 - iter_num / max_iterations) ** 0.9
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr_
-
-            iter_num = iter_num + 1
-            writer.add_scalar('info/lr', lr_, iter_num)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            iter_num += 1
             writer.add_scalar('info/total_loss', loss, iter_num)
-            writer.add_scalar('info/loss_ce', loss_ce, iter_num)
 
-            logging.info('iteration %d : loss : %f, loss_ce: %f' % (iter_num, loss.item(), loss_ce.item()))
+        val_miou, val_dice, val_pa = validate()
+        logging.info(f'Epoch {epoch_num}: val mIoU={val_miou:.4f}, Dice={val_dice:.4f}, PA={val_pa:.4f}')
+        writer.add_scalar('val/mIoU', val_miou, epoch_num)
+        writer.add_scalar('val/Dice', val_dice, epoch_num)
+        writer.add_scalar('val/PA', val_pa, epoch_num)
 
-            if iter_num % 20 == 0:
-                image = image_batch[1, 0:1, :, :]
-                image = (image - image.min()) / (image.max() - image.min())
-                writer.add_image('train/Image', image, iter_num)
-                outputs = torch.argmax(torch.softmax(outputs, dim=1), dim=1, keepdim=True)
-                writer.add_image('train/Prediction', outputs[1, ...] * 50, iter_num)
-                labs = label_batch[1, ...].unsqueeze(0) * 50
-                writer.add_image('train/GroundTruth', labs, iter_num)
-
-        save_interval = 50  # int(max_epoch/6)
-        if epoch_num > int(max_epoch / 2) and (epoch_num + 1) % save_interval == 0:
-            save_mode_path = os.path.join(snapshot_path, 'epoch_' + str(epoch_num) + '.pth')
-            torch.save(model.state_dict(), save_mode_path)
-            logging.info("save model to {}".format(save_mode_path))
-
-        if epoch_num >= max_epoch - 1:
-            save_mode_path = os.path.join(snapshot_path, 'epoch_' + str(epoch_num) + '.pth')
-            torch.save(model.state_dict(), save_mode_path)
-            logging.info("save model to {}".format(save_mode_path))
-            iterator.close()
+        scheduler.step()
+        early_stopping(val_miou, model)
+        if early_stopping.early_stop:
+            logging.info(f"Early stopped at epoch {epoch_num}")
             break
 
     writer.close()

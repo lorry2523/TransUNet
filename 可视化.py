@@ -7,7 +7,8 @@ from scipy.ndimage import zoom
 from skimage import morphology   # 新增
 
 # 参数设置（与训练时一致）
-img_size = 256
+img_size = 512
+vit_patches_size = 16
 vit_name = 'R50-ViT-B_16'
 num_classes = 2
 n_skip = 3
@@ -17,15 +18,19 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 config_vit = CONFIGS_ViT_seg[vit_name]
 config_vit.n_classes = num_classes
 config_vit.n_skip = n_skip
+# === 关键修复：手动设置 grid，与训练脚本完全一致 ===
+if vit_name.find('R50') != -1:
+    config_vit.patches.grid = (img_size // vit_patches_size, img_size // vit_patches_size)
+
 model = ViT_seg(config_vit, img_size=img_size, num_classes=num_classes).to(device)
 
-# 加载训练好的权重（请修改为你的最佳模型路径）
-snapshot_path = 'F:/Strain_Project/model/TU_Synapse256/TU_pretrain_R50-ViT-B_16_skip3_epo150_bs4_256/epoch_149.pth'
-model.load_state_dict(torch.load(snapshot_path, map_location=device))
+# 加载训练好的权重（消除 FutureWarning）
+snapshot_path = 'G:/Strain_Project/model/TU_Synapse512/TU_pretrain_R50-ViT-B_16_skip3_epo150_bs16_lr0.0001_512/best_model.pth'
+checkpoint = torch.load(snapshot_path, map_location=device, weights_only=True)
+model.load_state_dict(checkpoint)
 model.eval()
-
 # 加载测试样本（比如索引 0）
-data_path = './data/Synapse/test_vol_h5/6.npz'
+data_path = './data/Synapse/test_vol_h5/1.npz'
 data = np.load(data_path)
 image = data['image']      # (H,W,3)
 label = data['label']      # (H,W)

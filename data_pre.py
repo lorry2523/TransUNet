@@ -73,7 +73,7 @@ if __name__ == '__main__':
     import glob  # 放在这里避免干扰
 
     # ===== 请根据你的实际路径修改 =====
-    dataset_root = 'F:/Strain_Project/data'  # 你的数据集根目录（相对于项目根目录）
+    dataset_root = 'G:/Strain_Project/scripts/data2'  # 你的数据集根目录（相对于项目根目录）
 
     # 训练集转换
     convert_split(
@@ -87,6 +87,6 @@ if __name__ == '__main__':
     convert_split(
         images_dir=os.path.join(dataset_root, 'val', 'images'),
         masks_dir=os.path.join(dataset_root, 'val', 'masks'),
-        save_dir='./data/Synapse/test_vol_h5',
-        txt_path='./lists/lists_Synapse/test_vol.txt'
+        save_dir='./data/Synapse/val_npz',
+        txt_path='./lists/lists_Synapse/val.txt'
     )
